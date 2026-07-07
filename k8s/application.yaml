@@ -158,7 +158,7 @@ spec:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain   # keep data even after PVC is deleted
   hostPath:
-    path: /mnt/openwa-data          # ← change to your desired node path
+    path: /home/rog/docker-volumes/openwa          # ← change to your desired node path
     type: DirectoryOrCreate
 
 ---
