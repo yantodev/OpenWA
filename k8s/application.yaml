@@ -1,0 +1,422 @@
+# ============================================================
+# OpenWA — Kubernetes Manifest for k3s
+# ============================================================
+# Resources (in apply order):
+#   1. Namespace
+#   2. Secret          (sensitive env vars)
+#   3. ConfigMap       (non-sensitive env vars)
+#   4. PersistentVolume        (hostPath — node-local storage)
+#   5. PersistentVolumeClaim   (binds to the PV above)
+#   6. Deployment
+#   7. Service
+#   8. Ingress (optional — requires Traefik, which k3s includes)
+#
+# Apply:
+#   kubectl apply -f k8s/application.yaml
+#
+# Quick start with GHCR image:
+#   Replace <GITHUB_OWNER>/<REPO> with your actual values,
+#   or use the image pushed by the GitHub Actions workflow.
+# ============================================================
+
+# ─────────────────────────────────────────────────────────────
+# 1. Namespace
+# ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openwa
+  labels:
+    app.kubernetes.io/name: openwa
+
+---
+# ─────────────────────────────────────────────────────────────
+# 2. Secret  (sensitive values — edit before applying)
+#
+#    Encode a value:  echo -n "your-secret" | base64
+#    Leave empty string encoded:  echo -n "" | base64  →  ""
+# ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openwa-secret
+  namespace: openwa
+  labels:
+    app.kubernetes.io/name: openwa
+type: Opaque
+data:
+  # API master key — required in production
+  # echo -n "change-me-strong-random-key" | base64
+  API_MASTER_KEY: ""
+
+  # Database password (leave empty to use SQLite default)
+  DATABASE_PASSWORD: ""
+
+  # S3 / MinIO credentials (leave empty if not using S3)
+  S3_ACCESS_KEY_ID: ""
+  S3_SECRET_ACCESS_KEY: ""
+
+---
+# ─────────────────────────────────────────────────────────────
+# 3. ConfigMap  (non-sensitive environment variables)
+# ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openwa-config
+  namespace: openwa
+  labels:
+    app.kubernetes.io/name: openwa
+data:
+  # ── Core ──────────────────────────────────────────────────
+  NODE_ENV: "production"
+  PORT: "2785"
+  LOG_LEVEL: "info"
+
+  # ── Chromium / Puppeteer ──────────────────────────────────
+  # In k3s the container uses the bundled Chromium from the image
+  PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium"
+  PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
+  PUPPETEER_HEADLESS: "true"
+  # --no-sandbox is required when running as non-root inside k3s
+  PUPPETEER_ARGS: "--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu"
+
+  # ── XDG / Home (Chromium crash-proofing) ─────────────────
+  HOME: "/tmp"
+  XDG_CONFIG_HOME: "/tmp/.config"
+  XDG_CACHE_HOME: "/tmp/.cache"
+
+  # ── Database (leave blank → SQLite, app writes data/.env.generated) ─
+  DATABASE_TYPE: ""
+  DATABASE_NAME: ""
+  DATABASE_HOST: ""
+  DATABASE_PORT: ""
+  DATABASE_USERNAME: ""
+  POSTGRES_SCHEMA: ""
+  DATABASE_SYNCHRONIZE: "false"
+
+  # ── Engine ────────────────────────────────────────────────
+  # Leave blank to let the dashboard choose (defaults to whatsapp-web.js)
+  ENGINE_TYPE: ""
+  SESSION_DATA_PATH: "/app/data/sessions"
+
+  # ── WhatsApp Web version override (leave blank for auto) ─
+  WWEBJS_WEB_VERSION: ""
+  WWEBJS_WEB_VERSION_REMOTE_PATH: ""
+  WWEBJS_AUTH_TIMEOUT_MS: ""
+
+  # ── Storage ───────────────────────────────────────────────
+  STORAGE_TYPE: ""
+  STORAGE_LOCAL_PATH: ""
+  S3_ENDPOINT: ""
+  S3_REGION: ""
+  S3_BUCKET: ""
+
+  # ── Redis ─────────────────────────────────────────────────
+  REDIS_ENABLED: ""
+  REDIS_HOST: ""
+  REDIS_PORT: ""
+
+  # ── Webhook ───────────────────────────────────────────────
+  WEBHOOK_TIMEOUT: "10000"
+  WEBHOOK_MAX_RETRIES: "3"
+  WEBHOOK_RETRY_DELAY: "5000"
+
+  # ── Rate Limiting ─────────────────────────────────────────
+  RATE_LIMIT_TTL: "60"
+  RATE_LIMIT_MAX: "100"
+
+  # ── Plugins ───────────────────────────────────────────────
+  PLUGINS_ENABLED: "true"
+  PLUGINS_DIR: "/app/data/plugins"
+
+---
+# ─────────────────────────────────────────────────────────────
+# 4. PersistentVolume  (hostPath — data lives on the k3s node)
+#
+#    ⚠ hostPath PVs are node-local. If your pod reschedules to
+#      another node the data will NOT follow it.
+#      For multi-node clusters use NFS, Longhorn, or the k3s
+#      default local-path dynamic provisioner (see PVC comment
+#      at the bottom of this file).
+#
+#    Change /mnt/openwa-data to a real directory on your node:
+#      sudo mkdir -p /mnt/openwa-data && sudo chmod 777 /mnt/openwa-data
+# ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: openwa-data-pv
+  labels:
+    app.kubernetes.io/name: openwa
+    type: local
+spec:
+  storageClassName: manual          # must match PVC storageClassName
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain   # keep data even after PVC is deleted
+  hostPath:
+    path: /mnt/openwa-data          # ← change to your desired node path
+    type: DirectoryOrCreate
+
+---
+# ─────────────────────────────────────────────────────────────
+# 5. PersistentVolumeClaim
+# ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openwa-data-pvc
+  namespace: openwa
+  labels:
+    app.kubernetes.io/name: openwa
+spec:
+  storageClassName: manual          # binds to the PV above
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+# ─────────────────────────────────────────────────────────────
+# Alternative PVC using k3s built-in dynamic local-path provisioner
+# (delete the PV + PVC above and uncomment this block instead)
+#
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: openwa-data-pvc
+#   namespace: openwa
+# spec:
+#   storageClassName: local-path    # k3s default — no manual PV needed
+#   accessModes:
+#     - ReadWriteOnce
+#   resources:
+#     requests:
+#       storage: 5Gi
+# ─────────────────────────────────────────────────────────────
+
+---
+# ─────────────────────────────────────────────────────────────
+# 6. Deployment
+# ─────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openwa
+  namespace: openwa
+  labels:
+    app.kubernetes.io/name: openwa
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  # ⚠ Keep replicas: 1 — WhatsApp sessions are browser-process-bound (Chromium)
+  # and the session data PVC uses ReadWriteOnce. Horizontal scaling requires
+  # session sharing via Redis + an RWX volume (e.g. NFS/Longhorn).
+  selector:
+    matchLabels:
+      app: openwa
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: openwa
+        app.kubernetes.io/name: openwa
+    spec:
+      # ── Grace period matching docker-compose stop_grace_period: 45s ──
+      terminationGracePeriodSeconds: 45
+
+      # ── Security context (mirrors docker-compose hardening) ───────────
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000            # openwa user (created in Dockerfile)
+        runAsGroup: 1000
+        fsGroup: 1000              # ensures PVC files are group-owned
+
+      containers:
+        - name: openwa
+          # ── Image ─────────────────────────────────────────────────────
+          # Replace with your actual GHCR image pushed by the CI workflow:
+          #   ghcr.io/<github-owner>/<repo>:latest
+          image: ghcr.io/yantodev/openwa:latest
+          imagePullPolicy: Always
+
+          ports:
+            - name: http
+              containerPort: 2785
+              protocol: TCP
+
+          # ── Resource limits (mirror mem_limit: 2g from compose) ────────
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+
+          # ── Security (mirror cap_drop/cap_add + no-new-privileges) ─────
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETGID
+                - SETUID
+
+          # ── Environment from ConfigMap ──────────────────────────────────
+          envFrom:
+            - configMapRef:
+                name: openwa-config
+
+          # ── Sensitive env vars from Secret ─────────────────────────────
+          env:
+            - name: API_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwa-secret
+                  key: API_MASTER_KEY
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: openwa-secret
+                  key: DATABASE_PASSWORD
+            - name: S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: openwa-secret
+                  key: S3_ACCESS_KEY_ID
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwa-secret
+                  key: S3_SECRET_ACCESS_KEY
+
+          # ── Volume mounts ───────────────────────────────────────────────
+          volumeMounts:
+            # Persistent data: sessions, SQLite DB, plugins, media
+            - name: openwa-data
+              mountPath: /app/data
+
+            # tmpfs mounts (mirrors compose `tmpfs: - /tmp`)
+            - name: tmp
+              mountPath: /tmp
+
+          # ── Liveness probe ─────────────────────────────────────────────
+          livenessProbe:
+            httpGet:
+              path: /api/health/ready
+              port: 2785
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          # ── Readiness probe ────────────────────────────────────────────
+          readinessProbe:
+            httpGet:
+              path: /api/health/ready
+              port: 2785
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # ── Startup probe (Chromium + WhatsApp Web takes time to init) ─
+          startupProbe:
+            httpGet:
+              path: /api/health/ready
+              port: 2785
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12      # up to 120s startup window
+
+      # ── Volumes ──────────────────────────────────────────────────────────
+      volumes:
+        - name: openwa-data
+          persistentVolumeClaim:
+            claimName: openwa-data-pvc
+        - name: tmp
+          emptyDir:
+            medium: Memory            # in-memory tmpfs
+
+      # ── Image pull secret (needed if GHCR package is private) ────────────
+      # 1. Create the secret:
+      #    kubectl create secret docker-registry ghcr-secret \
+      #      --namespace openwa \
+      #      --docker-server=ghcr.io \
+      #      --docker-username=<github-username> \
+      #      --docker-password=<github-pat>
+      # 2. Uncomment the lines below:
+      # imagePullSecrets:
+      #   - name: ghcr-secret
+
+---
+# ─────────────────────────────────────────────────────────────
+# 7. Service
+# ─────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: openwa
+  namespace: openwa
+  labels:
+    app.kubernetes.io/name: openwa
+spec:
+  type: ClusterIP                   # use NodePort or LoadBalancer if no Ingress
+  selector:
+    app: openwa
+  ports:
+    - name: http
+      port: 80
+      targetPort: 2785
+      protocol: TCP
+
+---
+# ─────────────────────────────────────────────────────────────
+# 8. Ingress  (Traefik — included by default in k3s)
+#
+#    Replace openwa.example.com with your actual domain.
+#    For TLS: add cert-manager or configure Traefik's ACME resolver.
+# ─────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: openwa
+  namespace: openwa
+  labels:
+    app.kubernetes.io/name: openwa
+  annotations:
+    # Traefik (k3s default ingress controller)
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    # Uncomment for automatic TLS via cert-manager:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  # Uncomment + adjust for TLS:
+  # tls:
+  #   - hosts:
+  #       - openwa.example.com
+  #     secretName: openwa-tls
+  rules:
+    - host: openwa.example.com      # ← change to your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: openwa
+                port:
+                  number: 80

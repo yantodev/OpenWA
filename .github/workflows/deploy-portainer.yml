@@ -1,0 +1,136 @@
+# Deploy to k3s via kubectl
+# Equivalent of the GitLab CI config:
+#   1. Build & push Docker image to GHCR (tagged with commit SHA)
+#   2. kubectl set image → kubectl rollout status
+#
+# ── Required Secrets ──────────────────────────────────────────────────────────
+#   KUBE_CONFIG          base64-encoded kubeconfig for your k3s cluster
+#                        Generate with: cat ~/.kube/config | base64 -w 0
+#
+# ── Required Variables (Settings → Secrets → Variables, or hardcode below) ────
+#   K8S_DEPLOYMENT_NAME  Name of the Kubernetes Deployment (e.g. openwa)
+#   K8S_CONTAINER_NAME   Container name inside the Deployment spec
+#                        (must match spec.containers[].name in your manifest)
+#   K8S_NAMESPACE        Kubernetes namespace (e.g. webapp, default)
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # ── Change these to match your k3s deployment ──────────────────────────────
+  K8S_DEPLOYMENT_NAME: openwa           # kubectl deployment name
+  K8S_CONTAINER_NAME: openwa            # spec.containers[].name in your manifest
+  K8S_NAMESPACE: webapp                 # Kubernetes namespace
+  # ─────────────────────────────────────────────────────────────────────────────
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # 1️⃣  Build & Push Docker image
+  # ──────────────────────────────────────────────────────────────────────────
+  build_and_push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+      short_sha: ${{ steps.sha.outputs.short }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # amd64 only = faster build; add linux/arm64 if your k3s nodes are ARM
+          platforms: linux/amd64
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.short }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image summary
+        run: |
+          echo "### 🐳 Image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "\`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.short }}\`" >> $GITHUB_STEP_SUMMARY
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 2️⃣  Deploy to k3s via kubectl
+  # ──────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to k3s
+    runs-on: ubuntu-latest
+    needs: build_and_push
+    environment: production
+    steps:
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          mkdir -p ~/.kube
+          echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Update deployment image
+        env:
+          IMAGE: ${{ needs.build_and_push.outputs.image }}
+        run: |
+          kubectl set image deployment/${{ env.K8S_DEPLOYMENT_NAME }} \
+            ${{ env.K8S_CONTAINER_NAME }}=$IMAGE \
+            -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Wait for rollout to complete
+        run: |
+          kubectl rollout status deployment/${{ env.K8S_DEPLOYMENT_NAME }} \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=5m
+
+      - name: Verify pods
+        run: |
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} \
+            -l app=${{ env.K8S_DEPLOYMENT_NAME }} \
+            -o wide
+
+      - name: Deployment summary
+        if: always()
+        env:
+          IMAGE: ${{ needs.build_and_push.outputs.image }}
+          SHORT_SHA: ${{ needs.build_and_push.outputs.short_sha }}
+        run: |
+          echo "### 🚀 Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Namespace | \`${{ env.K8S_NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment | \`${{ env.K8S_DEPLOYMENT_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${IMAGE}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${SHORT_SHA}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Actor | \`${{ github.actor }}\` |" >> $GITHUB_STEP_SUMMARY
