@@ -23,7 +23,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
   # ── Change these to match your k3s deployment ──────────────────────────────
   K8S_DEPLOYMENT_NAME: openwa           # kubectl deployment name
   K8S_CONTAINER_NAME: openwa            # spec.containers[].name in your manifest
@@ -42,7 +41,8 @@ jobs:
     name: Build & Push
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+      # image ref uses the lowercased name computed in the step below
+      image: ${{ steps.image_ref.outputs.full }}
       short_sha: ${{ steps.sha.outputs.short }}
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +50,15 @@ jobs:
       - name: Get short SHA
         id: sha
         run: echo "short=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+      # Docker requires image names to be fully lowercase.
+      # github.repository may contain uppercase letters (e.g. yantodev/OpenWA).
+      - name: Compute lowercase image ref
+        id: image_ref
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=${REPO}" >> $GITHUB_OUTPUT
+          echo "full=${{ env.REGISTRY }}/${REPO}:${{ github.sha }}" >> $GITHUB_OUTPUT
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -72,16 +81,16 @@ jobs:
           # amd64 only = faster build; add linux/arm64 if your k3s nodes are ARM
           platforms: linux/amd64
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.short }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ steps.image_ref.outputs.name }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.image_ref.outputs.name }}:${{ steps.sha.outputs.short }}
+            ${{ env.REGISTRY }}/${{ steps.image_ref.outputs.name }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Image summary
         run: |
           echo "### 🐳 Image pushed" >> $GITHUB_STEP_SUMMARY
-          echo "\`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.short }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "\`${{ env.REGISTRY }}/${{ steps.image_ref.outputs.name }}:${{ steps.sha.outputs.short }}\`" >> $GITHUB_STEP_SUMMARY
 
   # ──────────────────────────────────────────────────────────────────────────
   # 2️⃣  Deploy to k3s via kubectl
