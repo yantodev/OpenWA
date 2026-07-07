@@ -26,7 +26,7 @@ env:
   # ── Change these to match your k3s deployment ──────────────────────────────
   K8S_DEPLOYMENT_NAME: openwa           # kubectl deployment name
   K8S_CONTAINER_NAME: openwa            # spec.containers[].name in your manifest
-  K8S_NAMESPACE: webapp                 # Kubernetes namespace
+  K8S_NAMESPACE: openwa                 # Kubernetes namespace (must match k8s/application.yaml)
   # ─────────────────────────────────────────────────────────────────────────────
 
 permissions:
@@ -101,6 +101,8 @@ jobs:
     needs: build_and_push
     environment: production
     steps:
+      - uses: actions/checkout@v4
+
       - name: Configure kubectl
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
@@ -108,6 +110,11 @@ jobs:
           mkdir -p ~/.kube
           echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
+
+      # Apply the full manifest first so Namespace / PV / PVC / Deployment / Service
+      # are created if they don't exist yet (idempotent — safe to run on every deploy).
+      - name: Apply Kubernetes manifests
+        run: kubectl apply -f k8s/application.yaml
 
       - name: Update deployment image
         env:
